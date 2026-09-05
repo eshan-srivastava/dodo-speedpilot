@@ -14,14 +14,15 @@ This project uses AI-assisted development and content generation tools.
 
 ## Things that AI got wrong
 
-1. Recommending Authorization header
+1. Recommending Authorization header as Bearer in first try than Basic. Using basic with key_id and key secret.
 
 ## Model Wise Details
 
 ### ChatGPT
 
 1. Spec formatting and augmentation with sections like models, must haves.
-2. Various options I have for API Key generation and storage options.
+2. Exploring various options I have for API Key generation and storage options.
+3.
 
 ### Gemini Web
 
@@ -30,11 +31,11 @@ This project uses AI-assisted development and content generation tools.
 ### Claude Web
 
 1. Spec formatting for topology, do not build, mock PSP
-2.
+2. Exploring various options for API key lifecycle. Validating that key_id and key_secret split has wins.
 
 ### Open Weights
 
-1.
+1. Coding execution of spec and design.md
 
 ## Responsibility
 

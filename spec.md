@@ -87,8 +87,18 @@ Textual entity/relationship summary (AI generated ER diagram linked later):
 - **Webhook Endpoint**
   - Belongs to exactly one Business.
   - A registered URL that receives signed event notifications.
+- **Webhook Delivery**
+  - used for coordinating webhook delivery jobs
 
 # Implementation Details
+
+## Logging
+
+Use a logger interface that is propogated to all the services - payments, invoices, etc. The actual implementation is a simple text based logger equivalent to log.printf or log.println from go's stdlib log
+
+## Model Shapes
+
+Refer to design.md file
 
 ## API Endpoints
 
@@ -150,7 +160,7 @@ Textual entity/relationship summary (AI generated ER diagram linked later):
 
 ## Mock PSP
 
-### 6.1 Token behavior table
+### Token behavior table
 
 | Token                    | Response                                         | Timing                              | Notes for caller                                                                                                                    |
 | ------------------------ | ------------------------------------------------ | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
@@ -160,7 +170,7 @@ Textual entity/relationship summary (AI generated ER diagram linked later):
 | `tok_timeout`            | Eventually returns success                       | Sleeps 30 seconds before responding | Caller must not hang waiting on this; must have its own timeout/handling strategy shorter than 30s.                                 |
 | `tok_network_error`      | HTTP 500, or the connection is dropped entirely  | Immediate/variable                  | Caller must handle both a hard error response and an abrupt connection drop (no assumption that a response body is always present). |
 
-### 6.2 Implications for `invoice-service`
+### Implications for `invoice-service`
 
 - The call to `mock-psp` must be made with a client-side timeout well
   under 30 seconds, so `tok_timeout` cannot hang a request or a payment
@@ -174,6 +184,35 @@ Textual entity/relationship summary (AI generated ER diagram linked later):
   `POST /invoices/{id}/pay` — including retries triggered by a client
   after a perceived timeout — do not create duplicate payment attempts or
   double-charge state transitions.
+
+## API Route DTOs
+
+Refer apispec.md
+
+## Config Sourcing
+
+Configuration should be supplied through environment variables, with documented local defaults suitable for Docker Compose.
+
+configuration includes:
+
+```text
+DATABASE_URL
+PSP_BASE_URL
+PSP_TIMEOUT_MS
+API_BIND_ADDRESS
+WEBHOOK_TIMEOUT_MS
+WEBHOOK_MAX_RETRIES
+RUST_LOG
+```
+
+Secrets such as API-key hashing material or webhook-signing secrets must be a dummy value sourced from .env or environment variables, with environment variables overriding the .env values for these.
+
+Sensitive secrets are
+
+```text
+api_key_pepper
+webhook_sign_secret
+```
 
 ## Design.md references for implementations
 
