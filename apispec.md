@@ -38,6 +38,88 @@ Representative categories include:
 
 Sensitive implementation details and secrets must not be exposed in API errors.
 
+## API Keys
+
+Authentication on all business-scoped endpoints uses `Authorization: Basic base64(key_id:key_secret)` (see `DESIGN.md` §5).
+`key_id` is a non-secret public identifier stored plaintext and indexed; `key_secret` is stored only as
+`HMAC-SHA256(pepper, key_secret)` with the pepper sourced from the environment. The plaintext `key_secret`
+is returned once at creation/rotation time and is never retrievable afterwards.
+
+The three key-management routes below are unauthenticated demo helpers. They accept
+`application/x-www-form-urlencoded` bodies (not JSON).
+
+### Create API Key
+
+```http
+POST /api-keys
+Content-Type: application/x-www-form-urlencoded
+```
+
+Form fields:
+
+```text
+business_id=<business-uuid>
+```
+
+Success response (`201 Created`):
+
+```json
+{
+  "business_id": "<business-uuid>",
+  "key_id": "<public-id>",
+  "key_secret": "<plaintext-secret-once>"
+}
+```
+
+Errors: `404 not_found` if the business does not exist; `400 validation_error` if `business_id` is missing/invalid.
+
+### Rotate API Key
+
+Only the secret is regenerated; the `key_id` stays the same. The old secret stops working immediately
+(no overlap window — see `DESIGN.md` §5 for the production gap).
+
+```http
+POST /api-keys/rotate
+Content-Type: application/x-www-form-urlencoded
+```
+
+Form fields:
+
+```text
+key_id=<public-id>
+```
+
+Success response (`200 OK`):
+
+```json
+{
+  "business_id": "<business-uuid>",
+  "key_id": "<public-id>",
+  "key_secret": "<new-plaintext-secret-once>"
+}
+```
+
+Errors: `404 not_found` if the key is unknown or already revoked; `400 validation_error` if `key_id` is missing.
+
+### Revoke API Key
+
+Soft-deletes the key (`revoked_at = now()`). Further requests with it fail with `401 authentication_failed`.
+
+```http
+POST /api-keys/revoke
+Content-Type: application/x-www-form-urlencoded
+```
+
+Form fields:
+
+```text
+key_id=<public-id>
+```
+
+Success response: `204 No Content` (empty body).
+
+Errors: `404 not_found` if the key is unknown or already revoked; `400 validation_error` if `key_id` is missing.
+
 ## Create Invoice
 
 ```http

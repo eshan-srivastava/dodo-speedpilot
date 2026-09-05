@@ -320,6 +320,7 @@ dependencies = [
  "base64",
  "chrono",
  "hmac",
+ "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",

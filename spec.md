@@ -106,11 +106,19 @@ Refer to design.md file
 
 ### 1 Authentication
 
-- All endpoints (except the mock PSP's own endpoint) require an API key
-  scoped to a Business.
+- All endpoints (except the mock PSP's own endpoint and the three
+  `/api-keys` management helpers below) require an API key scoped to a
+  Business.
 - Key storage, hashing, transmission mechanism (e.g. header), and
   revocation approach are implementation decisions — to be defended in
   `DESIGN.md`.
+- API-key lifecycle helpers (unauthenticated demo routes, form-encoded
+  bodies per `apispec.md`):
+  - `POST /api-keys` — create a key; form field `business_id` only.
+  - `POST /api-keys/rotate` — regenerate the secret for an active key,
+    keeping the same `key_id`; form field `key_id` only.
+  - `POST /api-keys/revoke` — soft-delete via `revoked_at`; form field
+    `key_id` only.
 
 ### 2 Customers
 

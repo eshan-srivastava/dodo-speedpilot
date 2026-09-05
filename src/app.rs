@@ -1,6 +1,6 @@
 use crate::{config::Config, error::AppError};
 use axum::{
-    Json, Router,
+    Form, Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     routing::{get, post},
@@ -8,6 +8,7 @@ use axum::{
 use base64::Engine;
 use chrono::{NaiveDate, Utc};
 use hmac::{Hmac, Mac};
+use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -76,6 +77,20 @@ struct PayResult {
 struct EndpointInput {
     url: String,
 }
+#[derive(Deserialize)]
+struct CreateKeyInput {
+    business_id: Uuid,
+}
+#[derive(Deserialize)]
+struct KeyIdInput {
+    key_id: String,
+}
+#[derive(Serialize)]
+struct KeyPair {
+    business_id: Uuid,
+    key_id: String,
+    key_secret: String,
+}
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env();
@@ -104,6 +119,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn router(state: Shared) -> Router {
     Router::new()
+        .route("/api-keys", post(create_api_key))
+        .route("/api-keys/rotate", post(rotate_api_key))
+        .route("/api-keys/revoke", post(revoke_api_key))
         .route("/customers", post(create_customer).get(list_customers))
         .route("/customers/:id", get(get_customer))
         .route("/invoices", post(create_invoice).get(list_invoices))
@@ -153,6 +171,97 @@ async fn auth(headers: &HeaderMap, state: &AppState) -> Result<Uuid, AppError> {
 }
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+fn generate_key_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex(&bytes)
+}
+fn generate_key_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex(&bytes)
+}
+fn hash_secret(pepper: &str, secret: &str) -> Result<String, AppError> {
+    let mut mac =
+        HmacSha256::new_from_slice(pepper.as_bytes()).map_err(|_| AppError::Unauthorized)?;
+    mac.update(secret.as_bytes());
+    Ok(hex(&mac.finalize().into_bytes()))
+}
+
+async fn create_api_key(
+    State(s): State<Shared>,
+    Form(input): Form<CreateKeyInput>,
+) -> Result<(StatusCode, Json<KeyPair>), AppError> {
+    let exists = sqlx::query("SELECT 1 AS one FROM businesses WHERE id=$1")
+        .bind(input.business_id)
+        .fetch_optional(&s.db)
+        .await?
+        .is_some();
+    if !exists {
+        return Err(AppError::NotFound);
+    }
+    let key_id = generate_key_id();
+    let key_secret = generate_key_secret();
+    let secret_hash = hash_secret(&s.config.api_key_pepper, &key_secret)?;
+    sqlx::query("INSERT INTO api_keys(id,business_id,key_id,secret_hash) VALUES($1,$2,$3,$4)")
+        .bind(Uuid::now_v7())
+        .bind(input.business_id)
+        .bind(&key_id)
+        .bind(&secret_hash)
+        .execute(&s.db)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(KeyPair {
+            business_id: input.business_id,
+            key_id,
+            key_secret,
+        }),
+    ))
+}
+async fn rotate_api_key(
+    State(s): State<Shared>,
+    Form(input): Form<KeyIdInput>,
+) -> Result<Json<KeyPair>, AppError> {
+    if input.key_id.trim().is_empty() {
+        return Err(AppError::BadRequest("key_id is required".into()));
+    }
+    let row = sqlx::query("SELECT business_id FROM api_keys WHERE key_id=$1 AND revoked_at IS NULL")
+        .bind(&input.key_id)
+        .fetch_optional(&s.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let business_id: Uuid = row.get("business_id");
+    let new_secret = generate_key_secret();
+    let secret_hash = hash_secret(&s.config.api_key_pepper, &new_secret)?;
+    sqlx::query("UPDATE api_keys SET secret_hash=$1 WHERE key_id=$2 AND revoked_at IS NULL")
+        .bind(&secret_hash)
+        .bind(&input.key_id)
+        .execute(&s.db)
+        .await?;
+    Ok(Json(KeyPair {
+        business_id,
+        key_id: input.key_id,
+        key_secret: new_secret,
+    }))
+}
+async fn revoke_api_key(
+    State(s): State<Shared>,
+    Form(input): Form<KeyIdInput>,
+) -> Result<StatusCode, AppError> {
+    if input.key_id.trim().is_empty() {
+        return Err(AppError::BadRequest("key_id is required".into()));
+    }
+    let result =
+        sqlx::query("UPDATE api_keys SET revoked_at=now() WHERE key_id=$1 AND revoked_at IS NULL")
+            .bind(&input.key_id)
+            .execute(&s.db)
+            .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_customer(
