@@ -430,15 +430,14 @@ Blast Radius: For the exercise I have made API keys having all permissions. This
 
 ## 6. What I cut and Why
 
-1. Zero downtime key rotation - would need
+1. Zero downtime key rotation - would need in production, felt trivial but did not implement
+2. proper webhook delivery - even though I have worked with similar systems, implementing would take time
+3. Code cleanliness - currently all the logic is in app.rs file. This works for speedrunning the project via AI generated code but is not maintainable. Extensive refactoring to clean the code into properly separated modules is tantalizing to me but time constraints do not allow.
 
 ## 7. Production Readiness gap
 
 The document mentioned common points such as Observability, rate limiting, audit logs, refunds, dunning. Here are some production readiness gap points not from the ones listed:
 
 1. As discussed in API key model, for sake of time, each API key assumes all responsibilites. Ideally it would be better to have API keys be granular in terms of permissions assigned to them.
-2. `A Customer can belong to only one business`. While useful for cutting down scope of the exercise, in production most likely we will have customers that use multiple businesses powered by our payment service, that violates a fundamental data assumption and hence
-
-## 8. Other mentioned things
-
-1. Rate limiting ?
+2. `A Customer can belong to only one business`. While useful for cutting down scope of the exercise, in production most likely we will have customers that use multiple businesses powered by our payment service, that violates a fundamental data assumption and hence might warrant a lot of changes
+3.

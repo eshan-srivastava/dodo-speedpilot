@@ -391,7 +391,7 @@ async fn create_invoice(
     ))
 }
 async fn invoice_for(s: &AppState, business: Uuid, id: Uuid) -> Result<Invoice, AppError> {
-    let row = sqlx::query("SELECT customer_id,total_cents,state,due_date FROM invoices WHERE id=$1 AND business_id=$2").bind(id).bind(business).fetch_optional(&s.db).await?.ok_or(AppError::NotFound)?;
+    let row = sqlx::query("SELECT customer_id,total_cents,state::text AS state,due_date FROM invoices WHERE id=$1 AND business_id=$2").bind(id).bind(business).fetch_optional(&s.db).await?.ok_or(AppError::NotFound)?;
     let items = sqlx::query("SELECT description,quantity,unit_amount_cents FROM invoice_line_items WHERE invoice_id=$1 ORDER BY created_at").bind(id).fetch_all(&s.db).await?.into_iter().map(|r| LineItem { description:r.get("description"), quantity:r.get("quantity"), unit_amount_cents:r.get("unit_amount_cents") }).collect();
     Ok(Invoice {
         id,
@@ -573,7 +573,7 @@ async fn pay_invoice(
         psp_reference,
     };
     let mut tx = s.db.begin().await?;
-    sqlx::query("UPDATE payment_attempts SET status=$1,failure_code=$2,psp_reference=$3,updated_at=now() WHERE id=$4").bind(&status).bind(&failure_code).bind(psp_reference).bind(attempt).execute(&mut *tx).await?;
+    sqlx::query("UPDATE payment_attempts SET status=$1::payment_attempt_status,failure_code=$2,psp_reference=$3,updated_at=now() WHERE id=$4").bind(&status).bind(&failure_code).bind(psp_reference).bind(attempt).execute(&mut *tx).await?;
     // Step 4 - finalize with a second conditional update off payment_processing.
     if status == "succeeded" {
         sqlx::query(
