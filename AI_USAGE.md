@@ -8,6 +8,10 @@ This project uses AI-assisted development and content generation tools.
 - **Documentation:** All base text was written by me in markdown or text files. AI assisted in prettifying and formatting the content.
 - **Accuracy:** While I review all AI-assisted outputs, probabilistic errors or hallucinations may occasionally remain but I have done my best to rectify them. Please reach out or raise an issue if you find something that slipped by.
 
+## Decisions takent against or independently
+
+## Things that AI got wrong
+
 ## Model Wise Details
 
 ### ChatGPT
