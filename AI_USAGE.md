@@ -10,13 +10,18 @@ This project uses AI-assisted development and content generation tools.
 
 ## Decisions takent against or independently
 
+1. Deciding that API key will be split - Key ID and Key Secret similar to AWS. AI recommended stripe style single key but I have seen the the split pattern in razorpay and AWS. This also helps in finding the key quickly in DB. Stripe relies on embedding unique business key info in the api key to lookup fast, its easier to split for my scale. Confirmed my hypothesis with AI after this.
+
 ## Things that AI got wrong
+
+1. Recommending Authorization header
 
 ## Model Wise Details
 
 ### ChatGPT
 
-1.
+1. Spec formatting and augmentation with sections like models, must haves.
+2. Various options I have for API Key generation and storage options.
 
 ### Gemini Web
 
@@ -24,7 +29,8 @@ This project uses AI-assisted development and content generation tools.
 
 ### Claude Web
 
-1.
+1. Spec formatting for topology, do not build, mock PSP
+2.
 
 ### Open Weights
 
