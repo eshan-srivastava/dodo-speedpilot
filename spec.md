@@ -11,6 +11,8 @@ It models the core of a billing product: a business creates invoices for its cus
 
 The primary engineering focus is the invoice state machine, payment idempotency, external PSP failure handling, transactional data changes, and webhook delivery model.
 
+Also build a mock PSP as second binary that will be run in a separate container in docker compose.
+
 # Must Have
 
 - API key authentication, scoped to a business.

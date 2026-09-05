@@ -1,0 +1,16 @@
+CREATE TYPE invoice_state AS ENUM ('draft','open','paid','void','uncollectible');
+CREATE TYPE payment_attempt_status AS ENUM ('pending','succeeded','failed','unknown');
+CREATE TABLE businesses (id UUID PRIMARY KEY, name VARCHAR(255) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE api_keys (id UUID PRIMARY KEY, business_id UUID NOT NULL REFERENCES businesses(id), key_id TEXT NOT NULL UNIQUE, secret_hash TEXT NOT NULL, revoked_at TIMESTAMPTZ, last_used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE customers (id UUID PRIMARY KEY, business_id UUID NOT NULL REFERENCES businesses(id), name VARCHAR(255) NOT NULL, email VARCHAR(320) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE invoices (id UUID PRIMARY KEY, business_id UUID NOT NULL REFERENCES businesses(id), customer_id UUID NOT NULL REFERENCES customers(id), total_cents BIGINT NOT NULL CHECK(total_cents >= 0), state invoice_state NOT NULL, due_date DATE NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE invoice_line_items (id UUID PRIMARY KEY, invoice_id UUID NOT NULL REFERENCES invoices(id), description VARCHAR(500) NOT NULL, quantity BIGINT NOT NULL CHECK(quantity > 0), unit_amount_cents BIGINT NOT NULL CHECK(unit_amount_cents >= 0), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE payment_attempts (id UUID PRIMARY KEY, invoice_id UUID NOT NULL REFERENCES invoices(id), status payment_attempt_status NOT NULL, card_token VARCHAR(255) NOT NULL, psp_reference UUID, failure_code VARCHAR(64), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE idempotency_keys (business_id UUID NOT NULL, invoice_id UUID NOT NULL REFERENCES invoices(id), idempotency_key VARCHAR(255) NOT NULL, request_fingerprint TEXT NOT NULL, payment_attempt_id UUID NOT NULL REFERENCES payment_attempts(id), response JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (business_id, invoice_id, idempotency_key));
+CREATE TABLE webhook_endpoints (id UUID PRIMARY KEY, business_id UUID NOT NULL REFERENCES businesses(id), url TEXT NOT NULL, signing_secret TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ);
+CREATE TABLE webhook_deliveries (id UUID PRIMARY KEY, webhook_endpoint_id UUID NOT NULL REFERENCES webhook_endpoints(id), event_type VARCHAR(64) NOT NULL, payload JSONB NOT NULL, status VARCHAR(32) NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ, last_attempt_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), delivered_at TIMESTAMPTZ);
+CREATE INDEX customers_business_idx ON customers(business_id);
+CREATE INDEX invoices_business_state_idx ON invoices(business_id,state,created_at);
+CREATE INDEX payment_attempts_invoice_idx ON payment_attempts(invoice_id);
+CREATE INDEX webhook_endpoints_business_idx ON webhook_endpoints(business_id);
+CREATE INDEX webhook_deliveries_retry_idx ON webhook_deliveries(status,next_attempt_at);

@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: invoices
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d invoices"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+  mock-psp:
+    build: .
+    command: ["/usr/local/bin/mock-psp"]
+    environment:
+      PSP_BIND_ADDRESS: 0.0.0.0:8081
+    ports:
+      - "8081:8081"
+  invoice-service:
+    build: .
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/invoices
+      PSP_BASE_URL: http://mock-psp:8081
+      API_BIND_ADDRESS: 0.0.0.0:8080
+      API_KEY_PEPPER: development-pepper
+      DEV_API_KEY_ID: dev_key
+      DEV_API_KEY_SECRET: dev_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-psp:
+        condition: service_started
+    ports:
+      - "8080:8080"
