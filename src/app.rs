@@ -339,23 +339,57 @@ async fn pay_invoice(
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .ok_or_else(|| AppError::BadRequest("Idempotency-Key is required".into()))?;
-    let invoice =
-        sqlx::query("SELECT total_cents,state FROM invoices WHERE id=$1 AND business_id=$2")
-            .bind(id)
-            .bind(business)
-            .fetch_optional(&s.db)
-            .await?
-            .ok_or(AppError::NotFound)?;
-    if invoice.get::<String, _>("state") != "open" {
-        return Err(AppError::Conflict("invoice is not payable".into()));
-    }
     let fingerprint = hex(&Sha256::digest(input.card_token.as_bytes()));
-    let mut tx = s.db.begin().await?;
-    if let Some(row) = sqlx::query("SELECT request_fingerprint,response FROM idempotency_keys WHERE business_id=$1 AND invoice_id=$2 AND idempotency_key=$3 FOR UPDATE").bind(business).bind(id).bind(key).fetch_optional(&mut *tx).await? {
+    // Short-circuit: same business + invoice + key already seen -> replay stored response.
+    if let Some(row) = sqlx::query("SELECT request_fingerprint,response FROM idempotency_keys WHERE business_id=$1 AND invoice_id=$2 AND idempotency_key=$3").bind(business).bind(id).bind(key).fetch_optional(&s.db).await? {
         if row.get::<String, _>("request_fingerprint") != fingerprint { return Err(AppError::Conflict("idempotency key was reused with different parameters".into())); }
         let result: PayResult = serde_json::from_value(row.get("response")).map_err(|_| AppError::BadRequest("stored payment response is invalid".into()))?;
         return Ok(Json(result));
     }
+    // Steps 1+2 in ONE short transaction (no PSP call inside, no lock held
+    // across the PSP call): atomic claim open -> payment_processing plus the
+    // attempt row plus the idempotency reservation. A concurrent loser blocks
+    // only for microseconds on the row lock, then re-evaluates the WHERE on
+    // the new row version and gets 0 rows.
+    let mut tx = s.db.begin().await?;
+    // Step 1 - claim the invoice. Only one concurrent transaction flips
+    // open -> payment_processing; losers match 0 rows.
+    let claimed = sqlx::query(
+        "UPDATE invoices SET state='payment_processing',updated_at=now() WHERE id=$1 AND business_id=$2 AND state='open' RETURNING total_cents",
+    )
+    .bind(id)
+    .bind(business)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let total_cents = match claimed {
+        Some(row) => row.get::<i64, _>("total_cents"),
+        None => {
+            tx.rollback().await?;
+            // Distinguish unknown invoice (404) from unpayable state (409)
+            // so cross-tenant / missing ids do not leak as conflicts.
+            let exists = sqlx::query("SELECT 1 AS one FROM invoices WHERE id=$1 AND business_id=$2")
+                .bind(id)
+                .bind(business)
+                .fetch_optional(&s.db)
+                .await?
+                .is_some();
+            if !exists {
+                return Err(AppError::NotFound);
+            }
+            // Lost the claim race. Re-check idempotency: a same-key
+            // concurrent winner may have committed after our short-circuit.
+            if let Some(row) = sqlx::query("SELECT request_fingerprint,response FROM idempotency_keys WHERE business_id=$1 AND invoice_id=$2 AND idempotency_key=$3").bind(business).bind(id).bind(key).fetch_optional(&s.db).await? {
+                if row.get::<String, _>("request_fingerprint") != fingerprint { return Err(AppError::Conflict("idempotency key was reused with different parameters".into())); }
+                let result: PayResult = serde_json::from_value(row.get("response")).map_err(|_| AppError::BadRequest("stored payment response is invalid".into()))?;
+                return Ok(Json(result));
+            }
+            return Err(AppError::Conflict(
+                "invoice is not payable in its current state".into(),
+            ));
+        }
+    };
+    // Step 2 - record the payment attempt row. The (business_id, invoice_id,
+    // idempotency_key) unique constraint resolves same-key races here.
     let attempt = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO payment_attempts(id,invoice_id,status,card_token) VALUES($1,$2,'pending',$3)",
@@ -381,8 +415,12 @@ async fn pay_invoice(
         .execute(&mut *tx)
         .await?;
     if inserted.rows_affected() == 0 {
+        // Same-key winner committed between our short-circuit and our
+        // insert. Roll back our claim + orphan attempt atomically, then
+        // return the winner's response. Our attempt never touched the PSP.
+        tx.rollback().await?;
         let row = sqlx::query("SELECT request_fingerprint,response FROM idempotency_keys WHERE business_id=$1 AND invoice_id=$2 AND idempotency_key=$3")
-            .bind(business).bind(id).bind(key).fetch_one(&mut *tx).await?;
+            .bind(business).bind(id).bind(key).fetch_one(&s.db).await?;
         if row.get::<String, _>("request_fingerprint") != fingerprint {
             return Err(AppError::Conflict(
                 "idempotency key was reused with different parameters".into(),
@@ -393,7 +431,8 @@ async fn pay_invoice(
         return Ok(Json(result));
     }
     tx.commit().await?;
-    let response = s.http.post(format!("{}/payments", s.config.psp_base_url)).json(&serde_json::json!({"card_token":input.card_token,"amount_cents":invoice.get::<i64,_>("total_cents"),"currency":"USD"})).timeout(Duration::from_millis(s.config.psp_timeout_ms)).send().await;
+    // Step 3 - call the PSP. No lock is held here.
+    let response = s.http.post(format!("{}/payments", s.config.psp_base_url)).json(&serde_json::json!({"card_token":input.card_token,"amount_cents":total_cents,"currency":"USD"})).timeout(Duration::from_millis(s.config.psp_timeout_ms)).send().await;
     let (status, failure_code, psp_reference): (String, Option<String>, Option<Uuid>) =
         match response {
             Ok(response) if response.status().is_success() => {
@@ -426,14 +465,27 @@ async fn pay_invoice(
     };
     let mut tx = s.db.begin().await?;
     sqlx::query("UPDATE payment_attempts SET status=$1,failure_code=$2,psp_reference=$3,updated_at=now() WHERE id=$4").bind(&status).bind(&failure_code).bind(psp_reference).bind(attempt).execute(&mut *tx).await?;
+    // Step 4 - finalize with a second conditional update off payment_processing.
     if status == "succeeded" {
         sqlx::query(
-            "UPDATE invoices SET state='paid',updated_at=now() WHERE id=$1 AND state='open'",
+            "UPDATE invoices SET state='paid',updated_at=now() WHERE id=$1 AND state='payment_processing'",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    } else if status == "failed" {
+        sqlx::query(
+            "UPDATE invoices SET state='open',updated_at=now() WHERE id=$1 AND state='payment_processing'",
         )
         .bind(id)
         .execute(&mut *tx)
         .await?;
     }
+    // Ambiguous (unknown): deliberately leave the invoice in
+    // payment_processing. Reverting to open would allow a second request to
+    // re-attempt payment while the first PSP call may still succeed
+    // asynchronously (tok_timeout), recreating the overcharge risk. Recovery
+    // requires reconciliation (see DESIGN.md section 3).
     sqlx::query("UPDATE idempotency_keys SET response=$1 WHERE business_id=$2 AND invoice_id=$3 AND idempotency_key=$4")
         .bind(serde_json::to_value(&result).unwrap_or_default())
         .bind(business)

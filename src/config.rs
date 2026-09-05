@@ -23,11 +23,11 @@ impl Config {
             psp_timeout_ms: env::var("PSP_TIMEOUT_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(2_000),
+                .unwrap_or(3_000),
             webhook_timeout_ms: env::var("WEBHOOK_TIMEOUT_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(2_000),
+                .unwrap_or(4_000),
             webhook_max_retries: env::var("WEBHOOK_MAX_RETRIES")
                 .ok()
                 .and_then(|v| v.parse().ok())

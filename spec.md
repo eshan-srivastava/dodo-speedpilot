@@ -132,14 +132,22 @@ Refer to design.md file
 
 - `POST /invoices/{id}/pay` — accepts a mock card token, requires an
   `Idempotency-Key` header.
+  - Claims the invoice with a single atomic conditional update
+    (`open` → `payment_processing`). Only the claim winner proceeds to
+    the PSP call; losers are rejected with 409 Conflict without touching
+    the PSP.
   - Records a payment attempt.
-  - Calls the mock PSP.
-  - Updates invoice state based on the PSP result.
+  - Calls the mock PSP (no lock held across the call).
+  - Finalizes with a second conditional update off `payment_processing`:
+    `succeeded` → `paid`, well-formed `failed` → `open` (retryable),
+    ambiguous (`unknown`) → stays in `payment_processing` (see below).
   - Must be idempotent: repeated calls with the same `Idempotency-Key`
     against the same invoice must not create duplicate payment attempts
     or apply duplicate state transitions.
   - Must not corrupt invoice state if the PSP is slow (`tok_timeout`) or
     fails (`tok_network_error`).
+  - `pay` against any non-`open` state (`payment_processing`, `paid`,
+    `void`, `uncollectible`) is rejected with 409 Conflict.
 
 ### 5 Webhooks
 
@@ -180,8 +188,12 @@ Refer to design.md file
 - A payment attempt that times out or hits a network error must not be
   silently treated as success or as failure — it must be recorded as a
   distinct outcome (e.g. `pending`/`unknown`) so invoice state is never
-  corrupted by an ambiguous PSP response. Reconciliation strategy (if any)
-  for late/ambiguous outcomes is a `DESIGN.md` topic.
+  corrupted by an ambiguous PSP response. The invoice is left in
+  `payment_processing` (not reverted to `open`) because the PSP may still
+  succeed asynchronously — reverting would allow a retry that
+  double-charges. Reconciliation strategy (poll/webhook from PSP,
+  timeout-based recovery, or manual `void`/`uncollectible`) for
+  late/ambiguous outcomes is a `DESIGN.md` topic.
 - `Idempotency-Key` handling (see §8) must ensure that retried calls to
   `POST /invoices/{id}/pay` — including retries triggered by a client
   after a perceived timeout — do not create duplicate payment attempts or

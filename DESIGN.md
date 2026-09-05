@@ -66,16 +66,16 @@ webhook_deliveries
 4. Invoice
    A bill issued by a business to a customer.
 
-| Field         | Application Type | PostgreSQL Type     | Notes                                            |
-| ------------- | ---------------- | ------------------- | ------------------------------------------------ |
-| `id`          | UUID             | `UUID`              | Primary key                                      |
-| `business_id` | UUID             | `UUID`              | FK → Business                                    |
-| `customer_id` | UUID             | `UUID`              | FK → Customer                                    |
-| `total_cents` | i64              | `BIGINT`            | Server-computed; USD                             |
-| `state`       | enum             | `enum InvoiceState` | `draft`, `open`, `paid`, `void`, `uncollectible` |
-| `due_date`    | date             | `DATE`              | Invoice due date                                 |
-| `created_at`  | timestamp        | `TIMESTAMPTZ`       | Server-generated                                 |
-| `updated_at`  | timestamp        | `TIMESTAMPTZ`       | Server-managed                                   |
+| Field         | Application Type | PostgreSQL Type     | Notes                                                                  |
+| ------------- | ---------------- | ------------------- | ---------------------------------------------------------------------- |
+| `id`          | UUID             | `UUID`              | Primary key                                                            |
+| `business_id` | UUID             | `UUID`              | FK → Business                                                          |
+| `customer_id` | UUID             | `UUID`              | FK → Customer                                                          |
+| `total_cents` | i64              | `BIGINT`            | Server-computed; USD                                                   |
+| `state`       | enum             | `enum InvoiceState` | `draft`, `open`, `payment_processing`, `paid`, `void`, `uncollectible` |
+| `due_date`    | date             | `DATE`              | Invoice due date                                                       |
+| `created_at`  | timestamp        | `TIMESTAMPTZ`       | Server-generated                                                       |
+| `updated_at`  | timestamp        | `TIMESTAMPTZ`       | Server-managed                                                         |
 
 5. Invoice Line Item
 
@@ -124,7 +124,7 @@ The client does not supply the invoice total.
    used for checking by jobs to see which webhook still needs delivery
 
 | Field                 | Application Type   | PostgreSQL Type | Notes                            |
-| --------------------- | ------------------ | --------------- | -------------------------------- |
+| --------------------- | ------------------ | --------------- | -------------------------------- | --- |
 | `id`                  | UUID               | `UUID`          | Primary key                      |
 | `webhook_endpoint_id` | UUID               | `UUID`          | FK → Webhook Endpoint            |
 | `event_type`          | string             | `VARCHAR(64)`   | e.g. `invoice.created`           |
@@ -144,6 +144,7 @@ invoice state -> also maps to invoice state machine states
 CREATE TYPE invoice_state AS ENUM (
     'draft',
     'open',
+    'payment_processing',
     'paid',
     'void',
     'uncollectible'
@@ -195,49 +196,215 @@ I listed the postgres enum states in previous section, here is more detail on th
 
 - `draft`
 - `open`
+- `payment_processing`
 - `paid`
 - `void`
 - `uncollectible`
 
 with this table explaining what each state represents
 
-Suggested semantics:
-
-| State           | Meaning                                                           | Terminal? |
-| --------------- | ----------------------------------------------------------------- | --------: |
-| `draft`         | Invoice has been created but is not yet available for collection. |        No |
-| `open`          | Invoice is collectible and may be paid.                           |        No |
-| `paid`          | Invoice has been successfully paid.                               |       Yes |
-| `void`          | Invoice has been intentionally invalidated.                       |       Yes |
-| `uncollectible` | Invoice is considered no longer collectible.                      |       Yes |
+| State                | Meaning                                                                                                                                                               | Terminal? |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------: |
+| `draft`              | Invoice has been created but is not yet available for collection.                                                                                                     |        No |
+| `open`               | Invoice is collectible and may be paid. Only state `pay` can start from.                                                                                              |        No |
+| `payment_processing` | A payment attempt has claimed the invoice and the PSP call is in flight or the outcome is ambiguous (`unknown`). Non-payable; concurrent `pay` requests are rejected. |        No |
+| `paid`               | Invoice has been successfully paid.                                                                                                                                   |       Yes |
+| `void`               | Invoice has been intentionally invalidated.                                                                                                                           |       Yes |
+| `uncollectible`      | Invoice is considered no longer collectible.                                                                                                                          |       Yes |
 
 ascii diagram generated by AI
 
 ```text
-                 +--------+
-                 | draft  |
-                 +--------+
-                  |      |
-            open  |      | void
-                  v      v
-             +--------+ +------+
-             |  open  | | void |
-             +--------+ +------+
-              |   |  |
-       success|   |  |mark uncollectible
-              |   |  v
-              |   |+----------------+
-              |   +>| uncollectible |
-              |     +----------------+
-              v
-           +--------+
-           |  paid  |
-           +--------+
+                  +--------+
+                  | draft  |
+                  +--------+
+                   |      |
+             open  |      | void
+                   v      v
+              +--------+ +------+
+              |  open  | | void |
+              +--------+ +------+
+               |   |  |
+   claim (pay) |   |  |mark uncollectible
+               v   |  v
+  +-------------------+  +----------------+
+  | payment_processing|  | uncollectible |
+  +-------------------+  +----------------+
+   success|   failure| ambiguous
+          |   |      |(stays, needs reconciliation)
+          |   |      v
+          |   | (stays in payment_processing)
+          v   v
+       +--------+ +------+
+       |  paid  | | open | (revert on well-formed failure)
+       +--------+ +------+
 ```
+
+Valid transitions involving the claim:
+
+| From                 | To                   | Trigger                                             |
+| -------------------- | -------------------- | --------------------------------------------------- |
+| `open`               | `payment_processing` | `POST /invoices/{id}/pay` wins the atomic claim.    |
+| `payment_processing` | `paid`               | PSP returns well-formed `succeeded`.                |
+| `payment_processing` | `open`               | PSP returns well-formed `failed` (retryable again). |
+| `payment_processing` | (stays)              | PSP outcome ambiguous (`unknown`): no auto-resolve. |
+| `open`               | `void`               | Manual void.                                        |
+| `open`               | `uncollectible`      | Marked uncollectible.                               |
+
+Any `pay` against a non-`open` state (`payment_processing`, `paid`, `void`, `uncollectible`) is rejected with 409 Conflict. The claim itself is:
+
+```sql
+UPDATE invoices
+SET state = 'payment_processing', updated_at = now()
+WHERE id = $1 AND state = 'open';
+```
+
+`rows_affected = 1` wins the race and proceeds to the PSP call; `0` means a concurrent request already claimed/paid it (or it was voided) and the loser is rejected without touching the PSP. This is a single atomic statement: Postgres guarantees only one concurrent transaction flips `open` -> `payment_processing`, no lock is held across the PSP call, and it resolves in microseconds.
 
 ## 3. Payment Correctness and Failure Modes
 
+Flow for `POST /invoices/{id}/pay` (implemented in `pay_invoice`):
+
+Pre-check — same `business_id + invoice_id + Idempotency-Key` already stored → replay the stored response (409 if the fingerprint differs). This is outside any write transaction.
+
+Steps 1+2 — one short transaction, no PSP call inside, no lock held across the PSP call. It contains both the atomic claim and the attempt/idempotency reservation, so a same-key loser rolls back cleanly with no orphan row:
+
+Step 1 — claim the invoice (conditional update):
+
+```sql
+UPDATE invoices
+SET state = 'payment_processing', updated_at = now()
+WHERE id = $1 AND business_id = $2 AND state = 'open'
+RETURNING total_cents;
+```
+
+- Row returned → you won the race, proceed to step 2 in the same transaction.
+- No row → invoice wasn't `open` (concurrent claim, already paid, void, etc.). Roll back, re-check idempotency (a same-key winner may have committed after the pre-check), then reject with 409 Conflict (`invoice is not payable in its current state`), no PSP call, no waiting.
+
+Concurrent losers block only for microseconds on the row lock, then re-evaluate the `WHERE` against the new row version and match 0 rows — never blocking on a PSP call.
+
+Step 2 — record the payment attempt row (separate insert, this is where the `(business_id, invoice_id, idempotency_key)` unique constraint resolves same-key races):
+
+```sql
+INSERT INTO payment_attempts (id, invoice_id, idempotency_key, card_token, status, created_at)
+VALUES (...)
+-- status = 'pending' at this point, PSP hasn't responded yet
+```
+
+If the idempotency insert hits the `(business_id, invoice_id, idempotency_key)` unique violation, a same-key winner committed between the pre-check and this insert — roll back (undoing this loser's claim and orphan attempt row atomically) and return the winner's stored response. Our attempt never touched the PSP so it cannot double-charge.
+
+Step 3 — call the PSP (now, after the DB work, not holding any lock):
+
+With a client-side timeout well under 30s (`PSP_TIMEOUT_MS`, default 2000ms) so `tok_timeout` doesn't hang the request. Three outcomes: success, well-formed failure (`insufficient_funds`/`card_declined`), ambiguous (timeout/network error).
+
+Step 4 — finalize (second conditional update, using the payment attempt outcome):
+
+```sql
+UPDATE invoices
+SET state = 'paid', updated_at = now()
+WHERE id = $1 AND state = 'payment_processing';
+```
+
+or on failure:
+
+```sql
+UPDATE invoices
+SET state = 'open', updated_at = now()
+WHERE id = $1 AND state = 'payment_processing';
+```
+
+Also update the `payment_attempts` row status to `succeeded`/`failed`/`unknown` accordingly.
+
+On ambiguous outcome (timeout/network error): set `payment_attempts.status = 'unknown'` and leave the invoice in `payment_processing` rather than reverting to `open` — because the PSP may still succeed asynchronously (that is literally what `tok_timeout` simulates: eventual success after 30s). Reverting to `open` here would let a second request re-attempt payment while the first one might still land — the exact overcharge risk this design prevents. This is the one branch that deliberately doesn't auto-resolve; it needs reconciliation (poll/webhook from PSP, timeout-based recovery, or manual `void`/`uncollectible`), tracked as future work in section 6 rather than silently swept away.
+
+### PSP timeout
+
+Synchronous timeout.
+
+HTTP client has `PSP_TIMEOUT_MS` (default 2000ms), well under the mock PSP's 30s sleep for `tok_timeout`.
+
+On timeout / connection drop / HTTP 500 / malformed body the attempt is recorded as:
+
+```text
+payment_attempt = unknown (failure_code = psp_unavailable | psp_http_error | invalid_psp_response)
+invoice = payment_processing (left as-is, NOT reverted to open)
+```
+
+Rationale: the PSP may still charge the card asynchronously after our timeout fires, so reverting to `open` would allow a retry that double-charges. Invoices stuck in `payment_processing` need reconciliation — a future `GET /payments/{merchant_reference}` poll against the PSP, a PSP webhook, or manual `void`/`uncollectible` — none of which the mock PSP supports, so this is deferred (see section 6). Retry with the same `Idempotency-Key` replays the stored `unknown` response without a second PSP call; retry with a new key is rejected with 409 while the invoice is not `open`.
+
+### PSP succeeds, service crashes before persistence
+
+if
+
+```
+1. Create payment attempt
+2. Call PSP
+3. PSP charges card
+4. PSP returns success
+5. Service crashes
+6. DB update never happens
+```
+
+If the PSP supported idempotency we could just use the idempotency header to ensure that PSP does not allow successfuly retry as payment actually processed.
+
+Realistic option for demo is
+Assign a merchant transaction ID and later ask from the PSP:
+
+```json
+GET /payments/{merchant_reference}
+```
+
+skipping this implementation since PSP is a mock one.
+
+### Idempotency key reused with different body
+
+```
+same key + same request = return original response / error that already processed (if this is a false retry)
+same key + different request = 409 Conflict
+```
+
+idempotency key should be scoped to
+
+```json
+business_id
+idempotency_key
+request_hash
+response_status
+response_body
+```
+
+### /pay on a paid invoice
+
+Treat it like 409 Conflict.
+Being explicit makes it easier for caller to reason about as it knows the intent: actual new payment or faulty double payment.
+
 ## 4. Webhook Design
+
+### Signing:
+
+HMAC-SHA256 on webhook_secret and payload, as is standard with payment services.
+
+For project purposes the hmac runs only on webhook secret and payload, but we can add timestamp to it to stop replay attacks that occur after a fixed interval for production security/
+
+### Retry Numbers
+
+Total Retry Window - 3 hours
+with attempts having exponential backoff + random value.
+something like
+1, 10, 30, 120, 600, 1800, 7200 (an example).
+Random addition to exponential backoff prevents potential thundering herd if many payments start failing at same time due to other reasons.
+
+### Webhook Delivery
+
+For demo purposes running a background Tokio task is what I am choosing.
+In production we should move to a durable queue backed by infra like SQS etc and have stateless workers consume them.
+For a middle ground proof-of-concept i have included webhook deliveries persisting to postgres as way to provide persistence to delivery status.
+
+### Lists
+
+A webhook listing route can be useful for businesses to debug and inspect if needed for integration and debugging purposes.
+
+Otherwise for missed webhook updates, querying `GET /invoice/{id}` also returns latest status.
 
 ## 5. API Key Model
 
