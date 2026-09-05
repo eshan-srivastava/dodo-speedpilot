@@ -124,7 +124,7 @@ The client does not supply the invoice total.
    used for checking by jobs to see which webhook still needs delivery
 
 | Field                 | Application Type   | PostgreSQL Type | Notes                            |
-| --------------------- | ------------------ | --------------- | -------------------------------- | --- |
+| --------------------- | ------------------ | --------------- | -------------------------------- |
 | `id`                  | UUID               | `UUID`          | Primary key                      |
 | `webhook_endpoint_id` | UUID               | `UUID`          | FK → Webhook Endpoint            |
 | `event_type`          | string             | `VARCHAR(64)`   | e.g. `invoice.created`           |
@@ -134,7 +134,7 @@ The client does not supply the invoice total.
 | `next_attempt_at`     | timestamp nullable | `TIMESTAMPTZ`   | Next retry time                  |
 | `last_attempt_at`     | timestamp nullable | `TIMESTAMPTZ`   | Last delivery attempt            |
 | `created_at`          | timestamp          | `TIMESTAMPTZ`   | Server-generated                 |
-| `delivered_at`        | timestamp nullable | `TIMESTAMPTZ`   | Successful delivery time         |     |
+| `delivered_at`        | timestamp nullable | `TIMESTAMPTZ`   | Successful delivery time         |
 
 ### State Representations
 
